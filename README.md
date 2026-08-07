@@ -6,3 +6,8 @@ Basically the open-source & free/libre equivalent to [PearlFixFolia](https://www
 ## WARNING: Made with AI (cuz idk how to use Java)
 
 I am a random dev, and you should really not trust random stuff you find on the Internet. Take a look at the source code which is only a few hundred lines long. (click on the GitHub "view source" link on the side). And if you prefer, compile the project yourself with `mvn clean package` (requires Java JDK 21+ and Maven installed).
+
+## Limitations
+
+- Not very well tested (I made it for a private SMP with friends where we use pearl stasis from time to time)
+- Only works with bubble-column-water-based stasis chamber
