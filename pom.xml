@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>dev.xeaf</groupId>
-    <artifactId>foliastasisfix</artifactId>
+    <artifactId>PearlStasisFix</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 

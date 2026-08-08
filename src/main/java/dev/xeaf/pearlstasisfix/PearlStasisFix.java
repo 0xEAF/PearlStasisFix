@@ -1,4 +1,4 @@
-package dev.xeaf.foliastasisfix;
+package dev.xeaf.pearlstasisfix;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
@@ -20,14 +20,14 @@ import org.bukkit.util.BoundingBox;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class FoliaStasisFix extends JavaPlugin implements Listener {
+public class pearlstasisfix extends JavaPlugin implements Listener {
 
     private final ConcurrentHashMap<UUID, Entity> activeStasis = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("FoliaStasisFix enabled! Trapdoor-proof stasis chambers active.");
+        getLogger().info("pearlstasisfix enabled! Trapdoor-proof stasis chambers active.");
     }
 
     @EventHandler

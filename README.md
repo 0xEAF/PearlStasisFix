@@ -1,4 +1,5 @@
-# FoliaStasisFix
+# PearlStasisFix
+
 Ender pearl stasis chamber fix plugin - turns ender pearls from stasis chamber into. 
 Basically the open-source & free/libre equivalent to [PearlFixFolia](https://www.curseforge.com/minecraft/bukkit-plugins/pearlfixfolia).
 (not based on that plugin at all, plus I never tried it since it's closed source and not very downloaded/known).
