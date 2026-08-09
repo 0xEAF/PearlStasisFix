@@ -9,16 +9,18 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.Display;
+import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.EnderPearl;
 import org.bukkit.entity.Entity;
-import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.WorldLoadEvent;
+import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -33,6 +35,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class PearlStasisFix extends JavaPlugin implements Listener {
+
+    // Small armor stands are roughly this tall from feet to the top of the head slot.
+    // Used purely to line the visible helmet item up near the top of the target block.
+    private static final double ARMOR_STAND_HEAD_HEIGHT = 0.85;
 
     private final ConcurrentHashMap<UUID, Entity> activeStasis = new ConcurrentHashMap<>();
 
@@ -52,7 +58,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         loadDataFile();
         reattachAllPersistedStasis();
 
-        getLogger().info("PearlStasisFix enabled! Trapdoor-proof stasis chambers active, and they now survive restarts.");
+        getLogger().info("PearlStasisFix enabled! Trapdoor-proof, clickable, Bedrock-visible stasis chambers active.");
     }
 
     @Override
@@ -87,12 +93,12 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         }
     }
 
-    private void persistStasisRecord(UUID playerId, Location loc) {
+    private void persistStasisRecord(UUID playerId, Location anchorLoc) {
         String path = playerId.toString();
-        dataConfig.set(path + ".world", loc.getWorld().getName());
-        dataConfig.set(path + ".x", loc.getX());
-        dataConfig.set(path + ".y", loc.getY());
-        dataConfig.set(path + ".z", loc.getZ());
+        dataConfig.set(path + ".world", anchorLoc.getWorld().getName());
+        dataConfig.set(path + ".x", anchorLoc.getX());
+        dataConfig.set(path + ".y", anchorLoc.getY());
+        dataConfig.set(path + ".z", anchorLoc.getZ());
         saveDataFile();
     }
 
@@ -144,24 +150,24 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         double x = dataConfig.getDouble(playerIdStr + ".x");
         double y = dataConfig.getDouble(playerIdStr + ".y");
         double z = dataConfig.getDouble(playerIdStr + ".z");
-        Location loc = new Location(world, x, y, z);
+        Location anchorLoc = new Location(world, x, y, z);
 
         // Request the chunk to load. If the dummy entity survived (it's marked persistent),
         // ChunkLoadEvent below will find it and resume monitoring automatically. As a
         // fallback - in case the entity didn't survive for whatever reason - we check a
         // few ticks later and respawn it from the saved coordinates if still missing.
-        world.getChunkAtAsync(loc.getBlockX() >> 4, loc.getBlockZ() >> 4, true).thenAccept(chunk ->
-                Bukkit.getRegionScheduler().runDelayed(this, loc, (task) -> {
+        world.getChunkAtAsync(anchorLoc.getBlockX() >> 4, anchorLoc.getBlockZ() >> 4, true).thenAccept(chunk ->
+                Bukkit.getRegionScheduler().runDelayed(this, anchorLoc, (task) -> {
                     if (activeStasis.containsKey(playerId)) {
                         return; // ChunkLoadEvent already reattached it
                     }
                     getLogger().info("Stasis entity for " + playerId + " wasn't found on disk, respawning from saved coordinates.");
                     chunk.addPluginChunkTicket(this);
-                    Bukkit.getRegionScheduler().execute(this, loc, () -> {
-                        ItemDisplay dummy = world.spawn(loc, ItemDisplay.class);
+                    Bukkit.getRegionScheduler().execute(this, anchorLoc, () -> {
+                        ArmorStand dummy = world.spawn(toVisualSpawnLocation(anchorLoc), ArmorStand.class);
                         configureDummy(dummy, playerId);
                         activeStasis.put(playerId, dummy);
-                        monitorStasisTrigger(playerId, dummy, chunk);
+                        monitorStasisTrigger(playerId, dummy, chunk, anchorLoc);
                     });
                 }, 5L)
         );
@@ -170,7 +176,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     @EventHandler
     public void onChunkLoad(ChunkLoadEvent event) {
         for (Entity entity : event.getChunk().getEntities()) {
-            if (!(entity instanceof ItemDisplay dummy)) continue;
+            if (!(entity instanceof ArmorStand dummy)) continue;
             if (!dummy.getPersistentDataContainer().has(markerKey, PersistentDataType.BYTE)) continue;
 
             String ownerStr = dummy.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
@@ -188,7 +194,13 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             Chunk chunk = event.getChunk();
             chunk.addPluginChunkTicket(this);
             activeStasis.put(ownerId, dummy);
-            monitorStasisTrigger(ownerId, dummy, chunk);
+
+            // Reconstruct the anchor (top-of-block) location from the entity's actual
+            // position, since we only saved the visual offset for this entity itself.
+            Location anchorLoc = dummy.getLocation().clone();
+            anchorLoc.setY(dummy.getLocation().getY() + ARMOR_STAND_HEAD_HEIGHT);
+
+            monitorStasisTrigger(ownerId, dummy, chunk, anchorLoc);
         }
     }
 
@@ -254,58 +266,119 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     }
 
     private void createStasisDummy(Player player, EnderPearl realPearl, Location peakLoc) {
-        Location stasisLoc = peakLoc.clone();
+        // The anchor is used purely for game-logic (collision antenna math, persistence) -
+        // it stays pinned to the top of the target block regardless of entity type.
+        Location anchorLoc = peakLoc.clone();
+        anchorLoc.setX(anchorLoc.getBlockX() + 0.5);
+        anchorLoc.setY(anchorLoc.getBlockY() + 0.9);
+        anchorLoc.setZ(anchorLoc.getBlockZ() + 0.5);
 
-        // Snap X and Z to center to avoid walls
-        stasisLoc.setX(stasisLoc.getBlockX() + 0.5);
-        // Snap Y near the very top of the block so it touches closed trapdoors
-        stasisLoc.setY(stasisLoc.getBlockY() + 0.9);
-        stasisLoc.setZ(stasisLoc.getBlockZ() + 0.5);
-
-        Chunk chunk = stasisLoc.getChunk();
+        Chunk chunk = anchorLoc.getChunk();
         chunk.addPluginChunkTicket(this);
 
         UUID playerId = player.getUniqueId();
 
-        Bukkit.getRegionScheduler().execute(this, stasisLoc, () -> {
-            ItemDisplay dummy = stasisLoc.getWorld().spawn(stasisLoc, ItemDisplay.class);
+        Bukkit.getRegionScheduler().execute(this, anchorLoc, () -> {
+            ArmorStand dummy = anchorLoc.getWorld().spawn(toVisualSpawnLocation(anchorLoc), ArmorStand.class);
             configureDummy(dummy, playerId);
 
             activeStasis.put(playerId, dummy);
-            persistStasisRecord(playerId, stasisLoc);
+            persistStasisRecord(playerId, anchorLoc);
             realPearl.remove();
 
-            monitorStasisTrigger(playerId, dummy, chunk);
+            monitorStasisTrigger(playerId, dummy, chunk, anchorLoc);
         });
     }
 
-    private void configureDummy(ItemDisplay dummy, UUID playerId) {
-        dummy.setItemStack(new ItemStack(Material.ENDER_PEARL));
-        dummy.setBillboard(Display.Billboard.CENTER);
+    /** Feet position that lines the armor stand's head/helmet up near the anchor's Y. */
+    private Location toVisualSpawnLocation(Location anchorLoc) {
+        Location visual = anchorLoc.clone();
+        visual.setY(anchorLoc.getY() - ARMOR_STAND_HEAD_HEIGHT);
+        return visual;
+    }
+
+    private void configureDummy(ArmorStand dummy, UUID playerId) {
+        dummy.setVisible(false);
+        dummy.setSmall(true);
+        dummy.setBasePlate(false);
+        dummy.setArms(false);
+        dummy.setGravity(false);
+        dummy.setInvulnerable(true);
+        dummy.setCollidable(false);
+        dummy.setSilent(true);
+        dummy.setMarker(false); // keep a real hitbox so it's clickable
         // Persistent so it's saved as part of normal chunk/entity data and survives restarts.
         dummy.setPersistent(true);
+
+        EntityEquipment equipment = dummy.getEquipment();
+        if (equipment != null) {
+            equipment.setHelmet(new ItemStack(Material.ENDER_PEARL));
+        }
+
         dummy.getPersistentDataContainer().set(markerKey, PersistentDataType.BYTE, (byte) 1);
         dummy.getPersistentDataContainer().set(ownerKey, PersistentDataType.STRING, playerId.toString());
     }
 
     // ------------------------------------------------------------------
-    // Retrieval: watch for a NEW solid block appearing around the dummy (e.g. someone
-    // toggling a trapdoor via redstone) to know when to teleport the player back.
+    // Retrieval trigger #1: click the dummy directly (right-click or attack).
     // ------------------------------------------------------------------
 
-    private void monitorStasisTrigger(UUID playerId, Entity dummy, Chunk chunk) {
-        Location loc = dummy.getLocation();
-        Block center = loc.getBlock();
+    @EventHandler
+    public void onDummyRightClick(PlayerInteractEntityEvent event) {
+        if (isStasisDummy(event.getRightClicked())) {
+            event.setCancelled(true); // don't let vanilla armor stand equip/swap logic run
+            handleDummyClick(event.getRightClicked());
+        }
+    }
+
+    @EventHandler
+    public void onDummyAttack(EntityDamageByEntityEvent event) {
+        if (isStasisDummy(event.getEntity())) {
+            event.setCancelled(true); // the stand is invulnerable anyway, but stop knockback/particles too
+            handleDummyClick(event.getEntity());
+        }
+    }
+
+    private boolean isStasisDummy(Entity entity) {
+        return entity.getPersistentDataContainer().has(markerKey, PersistentDataType.BYTE);
+    }
+
+    private void handleDummyClick(Entity dummy) {
+        String ownerStr = dummy.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
+        if (ownerStr == null) return;
+
+        UUID ownerId;
+        try {
+            ownerId = UUID.fromString(ownerStr);
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+
+        Location destination = dummy.getLocation();
+        Chunk chunk = destination.getChunk();
+
+        triggerTeleport(ownerId, destination);
+        dummy.remove();
+        cleanUp(ownerId, chunk);
+    }
+
+    // ------------------------------------------------------------------
+    // Retrieval trigger #2: watch for a NEW solid block appearing around the dummy
+    // (e.g. someone toggling a trapdoor via redstone) to know when to teleport back.
+    // ------------------------------------------------------------------
+
+    private void monitorStasisTrigger(UUID playerId, Entity dummy, Chunk chunk, Location anchorLoc) {
+        Block center = anchorLoc.getBlock();
 
         // Stretch the hitbox slightly upward (Y + 0.8) to act as a collision "antenna"
         // This guarantees it catches trapdoors closing in the block directly above it
         BoundingBox pearlBox = new BoundingBox(
-                loc.getX() - 0.2,
-                loc.getY() - 0.2,
-                loc.getZ() - 0.2,
-                loc.getX() + 0.2,
-                loc.getY() + 0.8,
-                loc.getZ() + 0.2
+                anchorLoc.getX() - 0.2,
+                anchorLoc.getY() - 0.2,
+                anchorLoc.getZ() - 0.2,
+                anchorLoc.getX() + 0.2,
+                anchorLoc.getY() + 0.8,
+                anchorLoc.getZ() + 0.2
         );
 
         // Rolling edge-detection: track which relative positions are solid on THIS poll
@@ -317,7 +390,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         final Set<Long> previousSolid = new HashSet<>();
         final boolean[] initialized = {false};
 
-        Bukkit.getRegionScheduler().runAtFixedRate(this, loc, (task) -> {
+        Bukkit.getRegionScheduler().runAtFixedRate(this, anchorLoc, (task) -> {
             if (!dummy.isValid()) {
                 cleanUp(playerId, chunk);
                 task.cancel();
@@ -349,7 +422,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             initialized[0] = true;
 
             if (newCollisionDetected) {
-                triggerTeleport(playerId, loc);
+                triggerTeleport(playerId, anchorLoc);
                 dummy.remove();
                 cleanUp(playerId, chunk);
                 task.cancel();
