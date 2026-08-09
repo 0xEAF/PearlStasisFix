@@ -55,7 +55,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         loadDataFile();
         reattachAllPersistedStasis();
 
-        getLogger().info("PearlStasisFix enabled! Trapdoor-proof, clickable, Bedrock-visible stasis chambers active.");
+        getLogger().info("PearlStasisFix enabled!");
     }
 
     @Override
@@ -476,8 +476,8 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         Player player = Bukkit.getPlayer(playerId);
         if (player != null && player.isOnline()) {
             player.teleportAsync(destination).thenAccept(success -> {
-                if (success) {
-                    player.sendMessage("§aYou have been returned to your stasis chamber!");
+                if (!success) {
+                    player.sendMessage("§cThere was an internal unhandled error while teleporting you.");
                 }
             });
         }
