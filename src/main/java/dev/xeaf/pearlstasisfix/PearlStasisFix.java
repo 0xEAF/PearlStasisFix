@@ -9,22 +9,23 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.EnderPearl;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.WorldLoadEvent;
-import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.BoundingBox;
+import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.IOException;
@@ -35,10 +36,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class PearlStasisFix extends JavaPlugin implements Listener {
-
-    // Small armor stands are roughly this tall from feet to the top of the head slot.
-    // Used purely to line the visible helmet item up near the top of the target block.
-    private static final double ARMOR_STAND_HEAD_HEIGHT = 0.85;
 
     private final ConcurrentHashMap<UUID, Entity> activeStasis = new ConcurrentHashMap<>();
 
@@ -164,10 +161,11 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
                     getLogger().info("Stasis entity for " + playerId + " wasn't found on disk, respawning from saved coordinates.");
                     chunk.addPluginChunkTicket(this);
                     Bukkit.getRegionScheduler().execute(this, anchorLoc, () -> {
-                        ArmorStand dummy = world.spawn(toVisualSpawnLocation(anchorLoc), ArmorStand.class);
+                        Item dummy = world.dropItem(anchorLoc, new ItemStack(Material.ENDER_PEARL));
                         configureDummy(dummy, playerId);
                         activeStasis.put(playerId, dummy);
                         monitorStasisTrigger(playerId, dummy, chunk, anchorLoc);
+                        pinDummyInPlace(dummy, anchorLoc);
                     });
                 }, 5L)
         );
@@ -176,7 +174,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     @EventHandler
     public void onChunkLoad(ChunkLoadEvent event) {
         for (Entity entity : event.getChunk().getEntities()) {
-            if (!(entity instanceof ArmorStand dummy)) continue;
+            if (!(entity instanceof Item dummy)) continue;
             if (!dummy.getPersistentDataContainer().has(markerKey, PersistentDataType.BYTE)) continue;
 
             String ownerStr = dummy.getPersistentDataContainer().get(ownerKey, PersistentDataType.STRING);
@@ -195,13 +193,48 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             chunk.addPluginChunkTicket(this);
             activeStasis.put(ownerId, dummy);
 
-            // Reconstruct the anchor (top-of-block) location from the entity's actual
-            // position, since we only saved the visual offset for this entity itself.
-            Location anchorLoc = dummy.getLocation().clone();
-            anchorLoc.setY(dummy.getLocation().getY() + ARMOR_STAND_HEAD_HEIGHT);
+            // Prefer the saved anchor coordinates over the entity's current position -
+            // if it had drifted from bubble column push before a restart, the entity's
+            // own location would just re-lock it at the wrong (drifted) spot.
+            Location anchorLoc = readPersistedAnchor(ownerId);
+            if (anchorLoc == null) {
+                anchorLoc = dummy.getLocation();
+            }
 
             monitorStasisTrigger(ownerId, dummy, chunk, anchorLoc);
+            pinDummyInPlace(dummy, anchorLoc);
         }
+    }
+
+    private Location readPersistedAnchor(UUID playerId) {
+        String path = playerId.toString();
+        String worldName = dataConfig.getString(path + ".world");
+        if (worldName == null) return null;
+        World world = Bukkit.getWorld(worldName);
+        if (world == null) return null;
+        double x = dataConfig.getDouble(path + ".x");
+        double y = dataConfig.getDouble(path + ".y");
+        double z = dataConfig.getDouble(path + ".z");
+        return new Location(world, x, y, z);
+    }
+
+    /**
+     * Bubble columns re-apply upward velocity to any entity sitting in them every tick -
+     * including our own "frozen" item, which would otherwise slowly (or not so slowly)
+     * drift up out of the chamber and out of click range. Continuously re-pin it instead
+     * of only zeroing its velocity once at creation.
+     */
+    private void pinDummyInPlace(Item dummy, Location anchorLoc) {
+        Bukkit.getRegionScheduler().runAtFixedRate(this, anchorLoc, (task) -> {
+            if (!dummy.isValid()) {
+                task.cancel();
+                return;
+            }
+            dummy.setVelocity(new Vector(0, 0, 0));
+            if (dummy.getLocation().distanceSquared(anchorLoc) > 0.0001) {
+                dummy.teleport(anchorLoc);
+            }
+        }, 1L, 1L);
     }
 
     // ------------------------------------------------------------------
@@ -266,8 +299,8 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     }
 
     private void createStasisDummy(Player player, EnderPearl realPearl, Location peakLoc) {
-        // The anchor is used purely for game-logic (collision antenna math, persistence) -
-        // it stays pinned to the top of the target block regardless of entity type.
+        // The anchor is used for game-logic (collision antenna math, persistence) and
+        // doubles as the exact spawn point for the visible item.
         Location anchorLoc = peakLoc.clone();
         anchorLoc.setX(anchorLoc.getBlockX() + 0.5);
         anchorLoc.setY(anchorLoc.getBlockY() + 0.9);
@@ -279,7 +312,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
         UUID playerId = player.getUniqueId();
 
         Bukkit.getRegionScheduler().execute(this, anchorLoc, () -> {
-            ArmorStand dummy = anchorLoc.getWorld().spawn(toVisualSpawnLocation(anchorLoc), ArmorStand.class);
+            Item dummy = anchorLoc.getWorld().dropItem(anchorLoc, new ItemStack(Material.ENDER_PEARL));
             configureDummy(dummy, playerId);
 
             activeStasis.put(playerId, dummy);
@@ -287,46 +320,43 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             realPearl.remove();
 
             monitorStasisTrigger(playerId, dummy, chunk, anchorLoc);
+            pinDummyInPlace(dummy, anchorLoc);
         });
     }
 
-    /** Feet position that lines the armor stand's head/helmet up near the anchor's Y. */
-    private Location toVisualSpawnLocation(Location anchorLoc) {
-        Location visual = anchorLoc.clone();
-        visual.setY(anchorLoc.getY() - ARMOR_STAND_HEAD_HEIGHT);
-        return visual;
-    }
-
-    private void configureDummy(ArmorStand dummy, UUID playerId) {
-        dummy.setVisible(false);
-        dummy.setSmall(true);
-        dummy.setBasePlate(false);
-        dummy.setArms(false);
+    private void configureDummy(Item dummy, UUID playerId) {
+        // A plain dropped-item entity renders identically on Java and Bedrock (via Geyser) -
+        // unlike Display entities (unsupported on Bedrock) or items in an armor stand's
+        // head slot (a confirmed, permanent Geyser limitation for non-armor items).
         dummy.setGravity(false);
+        dummy.setVelocity(new Vector(0, 0, 0));
+        dummy.setPickupDelay(Integer.MAX_VALUE);
+        dummy.setUnlimitedLifetime(true); // don't let it despawn after the usual 5 minutes
         dummy.setInvulnerable(true);
-        dummy.setCollidable(false);
         dummy.setSilent(true);
-        dummy.setMarker(false); // keep a real hitbox so it's clickable
         // Persistent so it's saved as part of normal chunk/entity data and survives restarts.
         dummy.setPersistent(true);
-
-        EntityEquipment equipment = dummy.getEquipment();
-        if (equipment != null) {
-            equipment.setHelmet(new ItemStack(Material.ENDER_PEARL));
-        }
 
         dummy.getPersistentDataContainer().set(markerKey, PersistentDataType.BYTE, (byte) 1);
         dummy.getPersistentDataContainer().set(ownerKey, PersistentDataType.STRING, playerId.toString());
     }
 
     // ------------------------------------------------------------------
-    // Retrieval trigger #1: click the dummy directly (right-click or attack).
+    // Retrieval trigger #1: touch the dummy directly.
+    //
+    // Note: a plain dropped item entity (unlike mobs, armor stands, or item frames) was
+    // never designed to be attack/interact-targetable by the vanilla client at all - no
+    // attack or interact packet gets sent for it no matter what the server does, so
+    // right-click/attack handlers below won't actually fire for it in practice. The
+    // reliable equivalent is proximity: walking close enough to touch it already fires a
+    // pickup event before any item transfer happens, so we hijack that as the trigger
+    // instead of just blocking it.
     // ------------------------------------------------------------------
 
     @EventHandler
     public void onDummyRightClick(PlayerInteractEntityEvent event) {
         if (isStasisDummy(event.getRightClicked())) {
-            event.setCancelled(true); // don't let vanilla armor stand equip/swap logic run
+            event.setCancelled(true);
             handleDummyClick(event.getRightClicked());
         }
     }
@@ -334,8 +364,16 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     @EventHandler
     public void onDummyAttack(EntityDamageByEntityEvent event) {
         if (isStasisDummy(event.getEntity())) {
-            event.setCancelled(true); // the stand is invulnerable anyway, but stop knockback/particles too
+            event.setCancelled(true); // it's invulnerable anyway, but stop knockback/particles too
             handleDummyClick(event.getEntity());
+        }
+    }
+
+    @EventHandler
+    public void onDummyTouch(EntityPickupItemEvent event) {
+        if (isStasisDummy(event.getItem())) {
+            event.setCancelled(true); // never actually let it be picked up
+            handleDummyClick(event.getItem());
         }
     }
 
