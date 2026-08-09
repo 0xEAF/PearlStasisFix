@@ -13,3 +13,4 @@ I am a random dev, and you should really not trust random stuff you find on the 
 
 - Not very well tested (I made it for a private SMP with friends where we use pearl stasis from time to time)
 - Only works with bubble-column-water-based stasis chamber
+- Only tested for 26.1.x/26.2, but may be compatible with 1.20.x/1.21.x
