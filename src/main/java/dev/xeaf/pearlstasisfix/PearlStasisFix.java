@@ -20,14 +20,14 @@ import org.bukkit.util.BoundingBox;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class pearlstasisfix extends JavaPlugin implements Listener {
+public class PearlStasisFix extends JavaPlugin implements Listener {
 
     private final ConcurrentHashMap<UUID, Entity> activeStasis = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("pearlstasisfix enabled! Trapdoor-proof stasis chambers active.");
+        getLogger().info("PearlStasisFix enabled! Trapdoor-proof stasis chambers active.");
     }
 
     @EventHandler
