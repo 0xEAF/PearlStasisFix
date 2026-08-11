@@ -232,7 +232,7 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             }
             dummy.setVelocity(new Vector(0, 0, 0));
             if (dummy.getLocation().distanceSquared(anchorLoc) > 0.0001) {
-                dummy.teleport(anchorLoc);
+                dummy.teleportAsync(anchorLoc);
             }
         }, 1L, 1L);
     }
