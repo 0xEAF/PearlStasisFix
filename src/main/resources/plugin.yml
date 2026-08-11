@@ -1,5 +1,5 @@
 name: PearlStasisFix
-version: '1.3.1'
+version: '1.3.2'
 main: dev.xeaf.pearlstasisfix.PearlStasisFix
 # Setting this to 1.20 ensures it loads on 1.20, 1.21, and 26.x
 api-version: '1.20'
