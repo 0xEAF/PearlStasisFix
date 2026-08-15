@@ -4,6 +4,7 @@ Ender pearl stasis chamber fix plugin - turns ender pearls from stasis chamber i
 Basically the open-source & free/libre equivalent to [PearlFixFolia](https://www.curseforge.com/minecraft/bukkit-plugins/pearlfixfolia).
 (not based on that plugin at all, plus I never tried it since it's closed source and not very downloaded/known).
 Also makes stasis chambers not dissapear when the player disconnects!
+Now also works with most nether ender pearl stasis chambers!
 
 ## WARNING: Made with AI (cuz idk how to use Java)
 
@@ -12,5 +13,4 @@ I am a random dev, and you should really not trust random stuff you find on the 
 ## Limitations
 
 - Not very well tested (I made it for a private SMP with friends where we use pearl stasis from time to time)
-- Only works with bubble-column-water-based stasis chamber
 - Only tested for 26.1.x/26.2, but may be compatible with 1.20.x/1.21.x

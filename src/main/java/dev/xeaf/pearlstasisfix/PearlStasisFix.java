@@ -7,6 +7,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.EnderPearl;
@@ -19,6 +20,7 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.inventory.ItemStack;
@@ -38,6 +40,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PearlStasisFix extends JavaPlugin implements Listener {
 
     private final ConcurrentHashMap<UUID, Entity> activeStasis = new ConcurrentHashMap<>();
+
+    // Counts, per player, how many of their in-flight pearls are currently "armed"
+    // (already inside a stasis medium, being tracked toward becoming a dummy but not
+    // resolved yet). Used to suppress vanilla's own teleport-on-hit so it doesn't fire
+    // a moment before/alongside our own logic - see onPearlTeleport() below.
+    private final ConcurrentHashMap<UUID, Integer> armedPearlCounts = new ConcurrentHashMap<>();
 
     private NamespacedKey markerKey;
     private NamespacedKey ownerKey;
@@ -238,24 +246,38 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
     }
 
     // ------------------------------------------------------------------
-    // Pearl tracking: let the bubble column carry it up naturally, and lock it in
-    // the instant it starts falling back down (the top of its arc).
+    // Pearl tracking: let the bubble column (or, in the Nether, a honey-block shaft)
+    // carry it up naturally, and lock it in once it's genuinely done rising - the top
+    // of its arc.
     // ------------------------------------------------------------------
+
+    // How many consecutive ticks of confirmed descent we require before committing to
+    // a peak. Bubble columns re-apply their upward push in discrete pulses rather than
+    // continuously, so there are often one or two ticks of natural deceleration (or even
+    // a tiny dip) between pulses while the pearl is still well inside the water. Locking
+    // on the very first such tick is what causes the dummy to end up frozen a block (or
+    // more) below the water's actual top. Requiring a short run of sustained descent
+    // filters that noise out without meaningfully delaying real detection.
+    private static final int REQUIRED_FALL_TICKS = 3;
 
     @EventHandler
     public void onPearlThrow(ProjectileLaunchEvent event) {
         if (!(event.getEntity() instanceof EnderPearl pearl)) return;
         if (!(pearl.getShooter() instanceof Player player)) return;
 
-        // Only arm once the pearl has actually entered a bubble column - this is what
-        // tells us "this is a stasis chamber throw", not just an ordinary pearl arcing
-        // through the air.
+        // Only arm once the pearl has actually entered a recognized stasis medium - this
+        // is what tells us "this is a stasis chamber throw", not just an ordinary pearl
+        // arcing through open air. Two mediums are recognized:
+        //  - water / a bubble column (the Overworld-style chamber)
+        //  - a honey block shaft (the Nether-style chamber, since water evaporates there)
         final AtomicBoolean armed = new AtomicBoolean(false);
         final double[] lastY = {Double.NEGATIVE_INFINITY};
         final Location[] peak = {null};
+        final int[] fallTicks = {0};
 
         pearl.getScheduler().runAtFixedRate(this, (task) -> {
             if (!pearl.isValid()) {
+                if (armed.get()) decrementArmed(player.getUniqueId());
                 task.cancel();
                 return;
             }
@@ -263,8 +285,9 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             Location loc = pearl.getLocation();
 
             if (!armed.get()) {
-                if (loc.getBlock().getType() == Material.BUBBLE_COLUMN) {
+                if (isFluidColumn(loc.getBlock()) || isTouchingHoney(loc.getBlock())) {
                     armed.set(true);
+                    incrementArmed(player.getUniqueId());
                     lastY[0] = loc.getY();
                     peak[0] = loc.clone();
                 }
@@ -282,20 +305,86 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
                 return;
             }
 
+            // While still genuinely inside water/a bubble column, NEVER treat a per-tick
+            // dip as descent - it's just the gap between bubble-column push pulses, not
+            // the pearl actually turning around. This is what stops the "locks a block
+            // below the real top" bug.
+            boolean stillSubmerged = isFluidColumn(loc.getBlock());
+
             // Small tolerance so tiny per-tick jitter isn't mistaken for descent.
-            if (loc.getY() >= lastY[0] - 0.02) {
+            if (stillSubmerged || loc.getY() >= lastY[0] - 0.02) {
                 // Still rising (or holding steady) - remember this as the highest point so far.
                 if (loc.getY() > lastY[0]) {
                     lastY[0] = loc.getY();
                     peak[0] = loc.clone();
                 }
+                fallTicks[0] = 0;
                 return;
             }
 
-            // It's now clearly falling - that's the top of the (uncapped) arc. Lock it in.
+            // It looks like it's started falling - but don't commit off a single tick.
+            // Require a short run of sustained descent first (see REQUIRED_FALL_TICKS).
+            fallTicks[0]++;
+            if (fallTicks[0] < REQUIRED_FALL_TICKS) {
+                return;
+            }
+
+            // It's now clearly and consistently falling - that's the top of the
+            // (uncapped) arc. Lock it in.
             createStasisDummy(player, pearl, peak[0]);
             task.cancel();
         }, null, 1L, 1L);
+    }
+
+    private void incrementArmed(UUID playerId) {
+        armedPearlCounts.merge(playerId, 1, Integer::sum);
+    }
+
+    private void decrementArmed(UUID playerId) {
+        armedPearlCounts.computeIfPresent(playerId, (id, count) -> count <= 1 ? null : count - 1);
+    }
+
+    /**
+     * The moment a pearl we're tracking physically touches a solid surface (e.g. clipping
+     * the side of the chamber shaft, or the same ceiling our own solid-cap check is about
+     * to catch on this very tick), vanilla fires its own hit handling and teleports the
+     * player immediately - independently of, and often a tick ahead of, our own detection
+     * logic actually locking the dummy in. Without this, both paths run: the player gets
+     * yanked there instantly by vanilla, AND our code separately finishes creating a
+     * frozen "leftover" dummy at the same spot a moment later - the duplicate the player
+     * sees. Suppressing the teleport itself (not the entity's removal/hit handling, which
+     * isn't reliably cancellable) leaves our own tracked-pearl logic as the single source
+     * of truth for when this pearl's teleport actually happens.
+     */
+    @EventHandler
+    public void onPearlTeleport(PlayerTeleportEvent event) {
+        if (event.getCause() != PlayerTeleportEvent.TeleportCause.ENDER_PEARL) return;
+        if (armedPearlCounts.containsKey(event.getPlayer().getUniqueId())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * True for water and bubble-column blocks - the fluid medium used by Overworld-style
+     * stasis chambers.
+     */
+    private boolean isFluidColumn(Block block) {
+        Material type = block.getType();
+        return type == Material.BUBBLE_COLUMN || type == Material.WATER;
+    }
+
+    /**
+     * True if the given block, or one of its horizontal neighbors, is a honey block.
+     * Honey doesn't need to be entered/passed through to affect an entity - sliding down
+     * alongside its face is what applies the heavy drag - so neighbors count too. This is
+     * the medium used by Nether-style stasis chambers, where water simply evaporates.
+     */
+    private boolean isTouchingHoney(Block block) {
+        if (block.getType() == Material.HONEY_BLOCK) return true;
+        for (BlockFace face : new BlockFace[]{BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST}) {
+            if (block.getRelative(face).getType() == Material.HONEY_BLOCK) return true;
+        }
+        return false;
     }
 
     private void createStasisDummy(Player player, EnderPearl realPearl, Location peakLoc) {
@@ -318,6 +407,14 @@ public class PearlStasisFix extends JavaPlugin implements Listener {
             activeStasis.put(playerId, dummy);
             persistStasisRecord(playerId, anchorLoc);
             realPearl.remove();
+            // Only NOW is it safe to stop suppressing vanilla's teleport-on-hit for this
+            // player - the real pearl that could still trigger it is actually gone. This
+            // execute() call runs on a later tick than the code that decided to call
+            // createStasisDummy() in the first place, so decrementing any earlier would
+            // leave a window where the (still-alive) real pearl sitting right against the
+            // trigger block could slip a vanilla teleport past our own suppression - the
+            // exact cause of the duplicate-pearl bug.
+            decrementArmed(playerId);
 
             monitorStasisTrigger(playerId, dummy, chunk, anchorLoc);
             pinDummyInPlace(dummy, anchorLoc);
